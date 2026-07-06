@@ -3,7 +3,7 @@ import torch
 from api.core.llm import tokenizer, polyglot_model
 
 
-async def generate_text(prompt: str, max_length: int = 128, temperature: float = 0.8, top_k: int = 50) -> str:
+async def generate_autoregressive(prompt: str, max_length: int = 128, temperature: float = 0.8, top_k: int = 50) -> str:
     input_ids = tokenizer.encode(prompt, return_tensors="pt")
 
     with torch.no_grad():

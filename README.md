@@ -50,7 +50,7 @@ mygpt/
 │   ├── prompts/
 │   │   └── rag.yaml             # RAG 프롬프트 템플릿
 │   └── services/
-│       ├── generate_service.py  # 텍스트 생성 로직
+│       ├── autoregressive_service.py  # 오토리그레시브 텍스트 생성 로직
 │       └── rag_service.py       # RAG 문서 등록 및 질의 로직
 ├── model/                       # GPT 모델 구현
 ├── train/                       # 학습 스크립트
@@ -98,9 +98,9 @@ uv run uvicorn api.main:app --reload
 
 헬스 체크
 
-### `POST /api/generate`
+### `POST /api/autoregressive`
 
-텍스트 생성
+오토리그레시브 텍스트 생성
 
 ```json
 // Request

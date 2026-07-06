@@ -1,14 +1,14 @@
 from pydantic import BaseModel
 
 
-class GenerateRequest(BaseModel):
+class AutoregressiveRequest(BaseModel):
     prompt: str
     max_length: int = 128
     temperature: float = 0.8
     top_k: int = 50
 
 
-class GenerateResponse(BaseModel):
+class AutoregressiveResponse(BaseModel):
     prompt: str
     generated_text: str
 
