@@ -2,28 +2,12 @@ from fastapi import APIRouter, File, UploadFile
 
 from api.graph.graph import graph
 from api.schema import (
-    AutoregressiveRequest,
-    AutoregressiveResponse,
     RAGRequest,
     RAGResponse,
 )
-from api.services import autoregressive_service, rag_service
+from api.services import rag_service
 
 router = APIRouter()
-
-
-@router.post(
-    "/autoregressive", response_model=AutoregressiveResponse, tags=["Autoregressive"]
-)
-async def generate_autoregressive(req: AutoregressiveRequest):
-    """autoregressive 텍스트 생성"""
-    generated_text = await autoregressive_service.generate_autoregressive(
-        prompt=req.prompt,
-        max_length=req.max_length,
-        temperature=req.temperature,
-        top_k=req.top_k,
-    )
-    return AutoregressiveResponse(prompt=req.prompt, generated_text=generated_text)
 
 
 @router.post("/documents", tags=["RAG"])

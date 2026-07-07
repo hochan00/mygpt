@@ -17,8 +17,6 @@ class Settings(BaseSettings):
     RAG_CHUNK_OVERLAP: int = 100
     CHROMA_PERSIST_DIR: str = "data/chroma_db"
 
-    POLYGLOT_MODEL: str = "EleutherAI/polyglot-ko-1.3b"
-
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
