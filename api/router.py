@@ -50,6 +50,14 @@ def query_rag_graph(req: RAGRequest):
     """LangGraph 기반 RAG 질문 답변"""
     result = graph.invoke({"question": req.question})
     sources = list({doc.metadata.get("source", "") for doc in result["documents"]})
+
+    code_examples = []
+    for doc in result["documents"]:
+        code_examples.extend(rag_service.extract_code_blocks(doc.page_content))
+
     return RAGResponse(
-        question=req.question, answer=result["generation"], sources=sources
+        question=req.question,
+        answer=result["generation"],
+        sources=sources,
+        code_examples=code_examples,
     )

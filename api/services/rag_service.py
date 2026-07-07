@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Any
 
 from langchain_chroma import Chroma
@@ -6,14 +7,15 @@ from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, load_prompt
 from langchain_core.runnables import RunnablePassthrough
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 
 from api.core.config import settings
 from api.core.llm import embeddings, get_llm
 
 logger = logging.getLogger(__name__)
 
-text_splitter = RecursiveCharacterTextSplitter(
+text_splitter = RecursiveCharacterTextSplitter.from_language(
+    language=Language.MARKDOWN,
     chunk_size=settings.RAG_CHUNK_SIZE,
     chunk_overlap=settings.RAG_CHUNK_OVERLAP,
 )
@@ -33,6 +35,10 @@ def format_docs(docs: list[Document]) -> str:
     if not docs:
         return "(관련 문서 없음)"
     return "\n\n---\n\n".join(doc.page_content for doc in docs)
+
+
+def extract_code_blocks(text: str) -> list[str]:
+    return re.findall(r"```[^\n]*\n(.*?)```", text, re.DOTALL)
 
 
 async def add_documents(text: str, source: str) -> int:
