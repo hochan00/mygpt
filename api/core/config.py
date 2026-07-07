@@ -13,8 +13,8 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "jhgan/ko-sroberta-multitask"
 
     RAG_TOP_K: int = 3
-    RAG_CHUNK_SIZE: int = 300
-    RAG_CHUNK_OVERLAP: int = 50
+    RAG_CHUNK_SIZE: int = 1000
+    RAG_CHUNK_OVERLAP: int = 100
     CHROMA_PERSIST_DIR: str = "data/chroma_db"
 
     POLYGLOT_MODEL: str = "EleutherAI/polyglot-ko-1.3b"
