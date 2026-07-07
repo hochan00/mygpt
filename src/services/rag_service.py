@@ -4,10 +4,10 @@ from typing import Any
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
-from api.core.llm import get_llm
-from api.services.document_store import get_retriever
-from api.services.prompts import RAG_PROMPT
-from api.services.utils import format_docs
+from src.core.llm import get_llm
+from src.services.document_store import get_retriever
+from src.services.prompts import RAG_PROMPT
+from src.services.utils import format_docs
 
 logger = logging.getLogger(__name__)
 

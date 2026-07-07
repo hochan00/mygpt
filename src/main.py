@@ -6,7 +6,7 @@ import logging
 
 from fastapi import FastAPI
 
-from api.router import router
+from src.router import router
 
 logging.basicConfig(level=logging.INFO)
 

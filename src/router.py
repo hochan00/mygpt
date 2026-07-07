@@ -1,11 +1,11 @@
 from fastapi import APIRouter, File, UploadFile
 
-from api.graph.graph import graph
-from api.schema import (
+from src.graph.graph import graph
+from src.schema import (
     RAGRequest,
     RAGResponse,
 )
-from api.services import document_store, rag_service, utils
+from src.services import document_store, rag_service, utils
 
 router = APIRouter()
 

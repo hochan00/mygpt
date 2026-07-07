@@ -1,7 +1,7 @@
 from langgraph.graph import END, START, StateGraph
 
-from api.graph.nodes import generate, retrieve
-from api.graph.state import GraphState
+from src.graph.nodes import generate, retrieve
+from src.graph.state import GraphState
 
 graph_builder = StateGraph(GraphState)
 

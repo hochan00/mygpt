@@ -4,8 +4,8 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 
-from api.core.config import settings
-from api.core.llm import embeddings
+from src.core.config import settings
+from src.core.llm import embeddings
 
 logger = logging.getLogger(__name__)
 

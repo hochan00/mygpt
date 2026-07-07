@@ -1,7 +1,7 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_huggingface import HuggingFaceEmbeddings
 
-from api.core.config import settings
+from src.core.config import settings
 
 embeddings = HuggingFaceEmbeddings(model_name=settings.EMBEDDING_MODEL)
 
