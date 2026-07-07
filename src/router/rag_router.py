@@ -1,6 +1,6 @@
 from fastapi import APIRouter, File, UploadFile
 
-from src.schema import (
+from src.schemas.rag_schema import (
     RAGRequest,
     RAGResponse,
 )

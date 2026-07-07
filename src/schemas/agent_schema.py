@@ -1,11 +1,11 @@
 from pydantic import BaseModel
 
 
-class RAGRequest(BaseModel):
+class AgentRequest(BaseModel):
     question: str
 
 
-class RAGResponse(BaseModel):
+class AgentResponse(BaseModel):
     question: str
     answer: str
     sources: list[str]
