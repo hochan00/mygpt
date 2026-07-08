@@ -7,3 +7,4 @@ def prompt(filename: str) -> ChatPromptTemplate:
 
 
 RAG_PROMPT = prompt("rag.yaml")
+GRADE_HALLUCINATION_PROMPT = prompt("grade_hallucination.yaml")

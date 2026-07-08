@@ -7,3 +7,4 @@ class GraphState(TypedDict):
     question: str
     documents: list[Document]
     generation: str
+    retry_count: int
