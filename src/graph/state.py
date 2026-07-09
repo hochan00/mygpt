@@ -11,3 +11,4 @@ class GraphState(TypedDict):
     hallucination_retry_count: int
     search_retry_count: int
     grounded: bool
+    relevant: bool
