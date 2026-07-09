@@ -109,14 +109,17 @@ flowchart TD
 
     gradeDoc -->|관련 있음| generate
     gradeDoc -.->|관련 없음, 첫 시도| transform
-    gradeDoc -->|관련 없음, 재시도 소진| refuse
+    gradeDoc -->|관련 없음, 재시도 소진 - 현재는 여기로 직행| refuse
+    gradeDoc -.->|재시도 소진 - 예정: web_search로 변경| web
     transform -.->|search_retry_count +1| retrieve
+    web -.-> generate
 
     generate --> gradeHallu
 
     gradeHallu -->|근거 부족, 횟수 제한 내| generate
     gradeHallu -->|근거 부족, 재시도 소진| refuse
-    gradeHallu -->|통과| END([END])
+    gradeHallu -->|통과 - 현재는 여기서 바로 종료| END([END])
+    gradeHallu -.->|통과 - 예정: grade_answer_relevance로 변경| gradeAns
     refuse --> END
 
     gradeAns -.->|부적절| transform
