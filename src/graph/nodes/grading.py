@@ -40,7 +40,7 @@ def route_hallucination_result(state: GraphState) -> str:
 
 
 def grade_documents(state: GraphState) -> dict:
-    query = state["query"]
+    query = state.get("query", state["question"])
     documents = state["documents"]
     search_retry_count = state.get("search_retry_count", 0)
 
