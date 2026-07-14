@@ -1,24 +1,27 @@
-# langgraph-agent
+# notion-assistant (langgraph-agent 개편)
 
-> LangGraph 기반 RAG 에이전트 — 단순 RAG 체인(baseline)과, 검색·생성 품질을 스스로 점검하고 보정하는
-> **Corrective RAG(CRAG)** 그래프를 나란히 구현하며 비교하는 개인 포트폴리오 프로젝트
+> LangGraph 기반 **Notion 개인 비서 에이전트** — 내 노션에서 정보를 찾아 종합해 답하고,
+> 새 내용을 적절한 위치에 작성하고, 자연어로 일정을 등록해주는 tool-calling 에이전트
 
-현재는 **FastAPI 공식 문서(한국어 튜토리얼)** 를 예시 데이터로 사용하지만, 이는 임시 데이터일 뿐이며
-목표는 특정 문서 도메인에 종속되지 않는 **범용 LangGraph 패턴**을 구현하는 것입니다.
+기존 CRAG(Corrective RAG) 프로젝트에서 개편한 프로젝트입니다. CRAG에서 구현한 판단 노드
+(`grade_documents`, `transform_query`, `grade_hallucination`)는 버리지 않고
+**노션 검색 도구의 내부 파이프라인으로 재사용**합니다.
 
 ---
 
 ## 목차
 
 - [핵심 아이디어](#핵심-아이디어)
+- [사용 시나리오](#사용-시나리오)
 - [아키텍처](#아키텍처)
-  - [요청 처리 흐름](#요청-처리-흐름)
-  - [LangGraph 그래프 구조](#langgraph-그래프-구조)
-  - [RAG 데이터 흐름](#rag-데이터-흐름)
+  - [LangGraph 그래프 구조 — ReAct 루프](#langgraph-그래프-구조--react-루프)
+  - [search_notion 내부 파이프라인](#search_notion-내부-파이프라인)
+  - [노션 증분 동기화](#노션-증분-동기화)
+- [도구 목록](#도구-목록)
 - [기술 스택](#기술-스택)
-- [프로젝트 구조](#프로젝트-구조)
+- [프로젝트 구조 (목표)](#프로젝트-구조-목표)
 - [설치 및 실행](#설치-및-실행)
-- [API 레퍼런스](#api-레퍼런스)
+- [API 설계 초안](#api-설계-초안)
 - [설계 결정](#설계-결정)
 - [로드맵](#로드맵)
 
@@ -26,159 +29,137 @@
 
 ## 핵심 아이디어
 
-이 프로젝트는 **같은 질문에 답하는 두 가지 방식을 동시에 제공**합니다.
+단순한 "Notion API 래퍼"가 아니라, **판단이 필요한 지점을 에이전트가 대신하는 것**이 목적입니다.
 
-| 엔드포인트 | 방식 | 목적 |
-|-----------|------|------|
-| `POST /api/rag` | 단순 검색 → 생성 체인 | 기준선(baseline) — 보정 로직 없음 |
-| `POST /api/agent` | LangGraph 기반 Corrective RAG | 검색·생성 품질을 스스로 점검·보정 |
+| 사람이 직접 하면 | 에이전트가 하면 |
+|---|---|
+| 검색창에 키워드를 넣고, 여러 페이지를 열어 읽고, 머릿속으로 종합 | 흩어진 노트를 찾아 **근거 검증을 거친 하나의 답변**으로 종합 |
+| 어느 페이지에 적을지 고민하고, 중복인지 기존 노트를 뒤져봄 | **관련 노트를 먼저 검색해서 "이어붙일지 / 새로 만들지" 판단** 후 확인을 구함 |
+| 캘린더를 열고 날짜·시간을 클릭해 입력 | "다음주 화요일 3시 팀 미팅"이라는 **자연어를 해석**해 일정 항목 생성 |
 
-두 방식을 나란히 두는 이유는, 나중에 **RAGAS / LangSmith 평가로 "CRAG 도입 전후"를 정량 비교**하기 위해서입니다.
-그래프가 완성되면 baseline은 비교 기준으로서의 역할을 마치고 제거됩니다.
+그래프 관점의 핵심 변화: 이전 CRAG는 분기 경우의 수를 사람이 미리 전부 설계한 **고정 그래프**였다면,
+이번에는 **LLM이 매 턴 어떤 도구를 쓸지 스스로 결정하는 ReAct 루프**입니다.
+요청마다 실제로 다른 경로(검색 / 작성 / 일정 / 그냥 대화)를 타기 때문에, 그래프 분기가 형식적이지 않고
+실질적으로 동작합니다.
+
+---
+
+## 사용 시나리오
+
+**A. 검색·질의응답** (도구: `search_notion`)
+
+> "저번주에 진행한 프로젝트A 정리한 문서에서 어떤 내용 협의했는지 확인할 수 있나?"
+
+관련 노트 검색 → 관련성 평가 → (실패 시 질의 재작성 후 재검색) → 여러 노트 종합 답변 → 근거 검증 →
+"[프로젝트A 회의록] 페이지에 이렇게 정리되어 있어요: ..." + 원본 페이지 링크
+
+**B. 노트 작성 — 신규 또는 병합** (도구: `write_note` + 승인)
+
+> "오늘 인터뷰 스터디에서 STAR 기법 배웠어, 나중에 참고하게 적어줘"
+
+관련 기존 노트 검색 → 없으면 "새 페이지로 만들까요?", 있으면 "[인터뷰 준비] 페이지에 이어붙일까요?" →
+**사용자 승인 후** 실행
+
+**C. 일정 등록** (도구: `create_event` + 승인)
+
+> "다음주 화요일 3시에 팀 미팅 잡아줘"
+
+자연어에서 날짜·시간·제목 해석 → "7/21(화) 15:00 '팀 미팅' 일정을 등록할까요?" → **승인 후**
+캘린더 뷰로 사용 중인 노션 데이터베이스에 날짜 속성을 채운 페이지 생성
+
+**D. 일반 대화** (도구 없음)
+
+> "LangGraph에서 interrupt가 뭐야?"
+
+검색·작성이 필요 없는 질문은 도구 호출 없이 바로 답변하고 종료 — LLM이 "도구가 필요 없다"고 판단하는
+것 자체가 하나의 경로
 
 ---
 
 ## 아키텍처
 
-### 요청 처리 흐름
-
-```mermaid
-flowchart LR
-    Client([클라이언트])
-
-    subgraph FastAPI["FastAPI (src/main.py)"]
-        RagRouter["rag_router<br/>/documents, /rag"]
-        AgentRouter["agent_router<br/>/agent"]
-    end
-
-    subgraph Services["services/"]
-        DocStore["document_store<br/>벡터스토어 · 리트리버"]
-        RagSvc["rag_service<br/>baseline 체인"]
-        Utils["utils<br/>코드블록 추출 등"]
-    end
-
-    subgraph Graph["graph/"]
-        LG["LangGraph<br/>retrieve → generate"]
-    end
-
-    Chroma[("ChromaDB<br/>data/chroma_db")]
-    Gemini{{"Gemini 2.5 Flash"}}
-    Embed{{"Qwen3-Embedding-0.6B<br/>(로컬)"}}
-
-    Client --> RagRouter
-    Client --> AgentRouter
-
-    RagRouter --> DocStore
-    RagRouter --> RagSvc
-    AgentRouter --> LG
-    AgentRouter --> Utils
-
-    RagSvc --> DocStore
-    LG --> DocStore
-    RagSvc --> Gemini
-    LG --> Gemini
-
-    DocStore --> Embed
-    DocStore --> Chroma
-```
-
-### LangGraph 그래프 구조
-
-**1~2단계(`retrieve → generate → grade_hallucination`)와 3단계 판단 노드(`grade_documents`)까지 구현 완료**,
-`transform_query`(질의 재작성)만 남았습니다. 아래 다이어그램에서 실선은 구현 완료, 점선은 구현 예정입니다.
+### LangGraph 그래프 구조 — ReAct 루프
 
 ```mermaid
 flowchart TD
-    START([START]) -.->|예정| routeQ
-    START --> retrieve
+    START([START]) --> agent
 
-    routeQ["route_question<br/>검색이 필요한 질문인가"]:::planned
-    retrieve["retrieve<br/>ChromaDB 벡터 검색"]
-    gradeDoc["grade_documents<br/>문서 관련성 평가"]
-    transform["transform_query<br/>질의 재작성"]:::planned
-    web["web_search<br/>재시도 소진 시 웹검색 폴백"]:::planned
-    generate["generate<br/>Gemini 답변 생성"]
-    gradeHallu["grade_hallucination<br/>답변이 문서에 근거하는가"]
-    refuse["refuse_answer<br/>답변 거절 (재시도 소진)"]
-    gradeAns["grade_answer_relevance<br/>답변이 질문에 답했는가"]:::planned
+    agent["agent<br/>Gemini가 도구 선택 또는 답변 생성"]
+    tools["tools<br/>도구 실행"]
+    confirm["confirm_action<br/>사용자 승인 대기 - interrupt"]
 
-    routeQ -.->|관련 없음| directEnd([즉시 응답]):::planned
-    routeQ -.->|관련 있음| retrieve
+    agent -->|도구 호출 없음 - 답변 완성| END([END])
+    agent -->|읽기 도구 - search_notion · web_search| tools
+    agent -->|쓰기 도구 - write_note · create_event| confirm
 
-    retrieve --> gradeDoc
+    confirm -->|승인| tools
+    confirm -->|거절 - 사유와 함께 재판단| agent
 
-    gradeDoc -->|관련 있음| generate
-    gradeDoc -.->|관련 없음, 첫 시도| transform
-    gradeDoc -->|관련 없음, 재시도 소진 - 현재는 여기로 직행| refuse
-    gradeDoc -.->|재시도 소진 - 예정: web_search로 변경| web
-    transform -.->|search_retry_count +1| retrieve
-    web -.-> generate
-
-    generate --> gradeHallu
-
-    gradeHallu -->|근거 부족, 횟수 제한 내| generate
-    gradeHallu -->|근거 부족, 재시도 소진| refuse
-    gradeHallu -->|통과 - 현재는 여기서 바로 종료| END([END])
-    gradeHallu -.->|통과 - 예정: grade_answer_relevance로 변경| gradeAns
-    refuse --> END
-
-    gradeAns -.->|부적절| transform
-    gradeAns -.->|통과| END
-
-    classDef planned stroke-dasharray: 5 5,fill:#f5f5f5,color:#888;
+    tools -->|실행 결과를 메시지로 추가| agent
 ```
 
-**핵심 설계 포인트 1 — 웹검색보다 로컬 재검색이 먼저**: `grade_documents`가 실패하면 **바로 웹검색으로 가지 않고,
-먼저 질문을 재작성해서 같은 로컬 ChromaDB를 재검색**합니다. 검색 실패의 대부분은 "문서에 내용이 없어서"가 아니라
-"질의 표현이 검색에 안 맞아서"이기 때문에, 비용이 드는 웹검색은 로컬 재검색까지 실패했을 때만 씁니다.
+**핵심 설계 포인트 1 — 조건부 엣지는 도구 개수만큼 늘어나지 않음**: "어떤 도구를 쓸지"는 그래프 엣지가
+아니라 `agent` 노드 안에서 LLM(`bind_tools`)이 이미 결정합니다. 그래프가 판단하는 것은
+"도구 호출이 있는가 / 그것이 쓰기 도구인가"라는 단순한 분기뿐이라, 도구가 늘어나도 그래프 구조는
+그대로입니다.
 
-**핵심 설계 포인트 2 — 재시도 카운터를 루프별로 분리**: `grade_documents`(문서 재검색)와 `grade_hallucination`
-(답변 재생성)은 서로 다른 시점에 도는 별개의 루프라, 재시도 횟수도 `search_retry_count` / `hallucination_retry_count`로
-**따로 관리**합니다. 하나의 카운터를 공유하면, 한쪽 루프가 이미 써버린 횟수 때문에 다른 쪽 루프가 재시도도 못 해보고
-조기 종료되는 버그가 생길 수 있습니다.
+**핵심 설계 포인트 2 — 쓰기만 승인을 받음**: 검색(읽기)은 실패해도 되돌릴 것이 없지만, 작성(쓰기)은
+잘못되면 기존 노트를 오염시킵니다. 그래서 `write_note`·`create_event`만 `confirm_action`
+(LangGraph `interrupt()` 기반 human-in-the-loop)을 거치고, 읽기 도구는 바로 실행합니다.
 
-**핵심 설계 포인트 3 — 실패해도 그냥 끝내지 않고 명시적으로 답변 거절**: 재시도를 다 써도 근거를 못 찾으면,
-`generation`을 조용히 그대로 반환하는 게 아니라 `refuse_answer` 노드를 거쳐 **"답변할 수 없다"는 사실을 명확히
-알리는 응답**으로 대체합니다. 이 노드를 판단 노드(`grade_documents`, `grade_hallucination`)와 분리해둔 이유는,
-나중에 `grade_answer_relevance` 등 다른 판단 노드가 실패했을 때도 **같은 노드를 재사용**하기 위해서입니다.
+**핵심 설계 포인트 3 — 상태는 MessagesState 기반**: 이전 CRAG의 필드형 상태
+(`question`/`documents`/`generation`)는 1회성 파이프라인용이었습니다. 비서는 여러 턴의 대화와
+도구 호출 이력을 이어가야 하므로, 메시지 리스트를 누적하는 `MessagesState` 기반으로 전환합니다.
 
-**그래프 상태(`GraphState`)** — 노드 간에 오가는 데이터:
+### search_notion 내부 파이프라인
 
-```python
-class GraphState(TypedDict):
-    question: str                    # 원본 질문 (재작성해도 값이 안 바뀜)
-    query: str                       # 검색용 질의 (transform_query가 갱신)
-    documents: list[Document]        # retrieve가 채움
-    generation: str                  # generate가 채움
-    grounded: bool                   # grade_hallucination의 판단 결과
-    relevant: bool                   # grade_documents의 판단 결과
-    hallucination_retry_count: int   # 답변 재생성 재시도 횟수
-    search_retry_count: int          # 문서 재검색 재시도 횟수
-```
-
-### RAG 데이터 흐름
-
-**① 문서 등록 (`POST /api/documents`)**
+이전 CRAG에서 구현한 판단 노드들이 여기서 그대로 재사용됩니다. 개인 노트는 LLM이 사전학습에서
+전혀 본 적 없는 내용이라, **근거 검증 없이는 신뢰할 수 있는 답이 성립하지 않습니다** —
+공개 문서 RAG에서는 "있으면 좋은" 검증이었지만, 개인 노트에서는 필수입니다.
 
 ```mermaid
 flowchart LR
-    File([".md 파일"]) --> Split["마크다운 구조 기반 분할<br/>chunk_size=1000"]
-    Split --> Emb["Qwen3-Embedding<br/>1024차원 벡터화"]
-    Emb --> Store[("ChromaDB 저장<br/>벡터 + 원문 + source")]
+    Q([검색 질의]) --> Sync["증분 동기화<br/>변경된 페이지만 재임베딩"]
+    Sync --> Retrieve["벡터 검색<br/>ChromaDB"]
+    Retrieve --> Grade["grade_documents<br/>관련성 평가"]
+    Grade -->|관련 있음| Gen["generate<br/>여러 노트 종합"]
+    Grade -->|관련 없음| Transform["transform_query<br/>질의 재작성"]
+    Transform --> Retrieve
+    Gen --> Hallu["grade_hallucination<br/>근거 검증"]
+    Hallu --> A([종합 답변 + 원본 페이지 링크])
 ```
 
-**② 질의 응답 (`POST /api/agent`)**
+### 노션 증분 동기화
+
+Notion API의 `search` 엔드포인트는 **페이지 제목만 검색**하며 본문은 검색 대상이 아닙니다
+(공식 문서: "titles that include the query param" — 커뮤니티에서도 잘 알려진 제약).
+따라서 본문 검색은 로컬 벡터 인덱스로 직접 해결하되, "스냅샷이 오래되는" 문제는
+**매 검색 요청 시점에 변경분만 확인·재임베딩**하는 방식으로 해결합니다.
 
 ```mermaid
 flowchart LR
-    Q(["질문"]) --> QEmb["질문 임베딩<br/>(1024차원)"]
-    QEmb --> Search["HNSW 유사도 검색<br/>top-k=5"]
-    Search --> Docs["관련 청크 5개"]
-    Docs --> Prompt["프롬프트 조립<br/>(context + question)"]
-    Prompt --> LLM{{"Gemini 2.5 Flash"}}
-    LLM --> Ans(["answer + sources + code_examples"])
-    Docs -.->|정규식 코드블록 추출| Ans
+    Trigger([검색 요청 시]) --> List["Notion search API<br/>빈 쿼리 + last_edited_time 정렬<br/>페이지 목록만 조회"]
+    List --> Diff["로컬 캐시와<br/>수정 시각 비교"]
+    Diff -->|변경 없음| Skip["기존 인덱스<br/>그대로 사용"]
+    Diff -->|변경된 페이지만| Fetch["본문 조회"]
+    Fetch --> Embed["재임베딩<br/>Qwen3-Embedding"]
+    Embed --> Chroma[("ChromaDB 갱신")]
 ```
+
+- 태그·데이터베이스 구조 등 **사용자에게 아무 정리 규칙도 강제하지 않음** — 자유롭게 적은 페이지도 검색 가능
+- 전체 재임베딩이 아니라 **변경분만** 처리하므로 요청당 오버헤드가 작음
+- Notion API는 무료이며 요청당 과금이 없음 (rate limit: 초당 평균 3건)
+
+---
+
+## 도구 목록
+
+| 도구 | 역할 | 성격 | 승인(HITL) |
+|------|------|------|:---:|
+| `search_notion` | 내 노션 페이지를 검색해 근거 검증을 거친 종합 답변 생성 | 읽기 | ✕ |
+| `web_search` | 노션에 없는 일반 지식·최신 정보 검색 | 읽기 | ✕ |
+| `write_note` | 관련 기존 페이지를 먼저 검색해 "병합 / 신규" 판단 후 작성 | 쓰기 | ✓ |
+| `create_event` | 자연어 일정을 해석해 캘린더 뷰 데이터베이스에 항목 생성 | 쓰기 | ✓ |
 
 ---
 
@@ -188,65 +169,68 @@ flowchart LR
 |------|------|----------|
 | 언어 | Python 3.13 | — |
 | 프레임워크 | FastAPI | 비동기 지원, 자동 Swagger 문서화 |
-| 오케스트레이션 | LangChain · LangGraph | 조건 분기·재시도 루프가 있는 워크플로우를 상태 그래프로 표현 |
-| LLM | Google Gemini 2.5 Flash | instruction-following 우수, 무료 티어 제공 |
-| 임베딩 | Qwen3-Embedding-0.6B (로컬) | `max_position_embeddings=32768` — 긴 청크도 잘림 없이 임베딩 |
-| 벡터 DB | ChromaDB (로컬 파일) | 별도 서버 없이 파일 기반으로 영속화 |
-| 모니터링 | LangSmith | 그래프 실행 과정 자동 트레이싱 |
+| 오케스트레이션 | LangChain · LangGraph | ReAct 루프 + human-in-the-loop(`interrupt`)를 상태 그래프로 표현 |
+| LLM | Google Gemini 2.5 Flash | tool-calling 지원, instruction-following 우수, 무료 티어 제공 |
+| 임베딩 | Qwen3-Embedding-0.6B (로컬) | 32K 토큰까지 처리 — 긴 노트도 잘림 없이 임베딩, 호출 비용 없음 |
+| 벡터 DB | ChromaDB (로컬 파일) | 별도 서버 없이 파일 기반 영속화, 증분 갱신 용이 |
+| 외부 연동 | Notion API (`notion-client`) | 페이지 목록·본문 조회, 페이지 생성 — 무료, rate limit 3 req/s |
+| 웹검색 | Tavily (예정) | RAG용으로 설계된 검색 API, 무료 티어 제공 |
+| 모니터링 | LangSmith | 도구 선택·그래프 실행 과정 자동 트레이싱 |
 | 패키지 관리 | uv | 빠른 의존성 해석, `pyproject.toml` + `uv.lock` |
-
-> **임베딩 모델 교체 이력**: 초기에는 `jhgan/ko-sroberta-multitask`를 사용했으나, 이 모델의 `max_seq_length`가
-> **128 토큰**(한국어 기준 약 230자)에 불과해 1000자 청크의 약 77%가 임베딩 단계에서 잘려 나갔습니다.
-> 검색 정확도에 직접적인 영향을 주는 문제라 32K 토큰까지 처리 가능한 Qwen3-Embedding-0.6B로 교체했습니다.
 
 ---
 
-## 프로젝트 구조
+## 프로젝트 구조 (목표)
+
+> 아직 개편 전이며, 아래는 목표 구조입니다. 현재 코드는 이전 CRAG 프로젝트 구조입니다
+> (이전 프로젝트 문서는 git 히스토리의 README.md 참고).
 
 ```
 langgraph-agent/
 ├── src/
-│   ├── main.py                  # FastAPI 앱 진입점, 라우터 등록
+│   ├── main.py                  # FastAPI 앱 진입점
 │   │
-│   ├── router/                  # HTTP 엔드포인트 정의
-│   │   ├── rag_router.py        #   /documents, /rag  (baseline)
-│   │   └── agent_router.py      #   /agent            (LangGraph)
+│   ├── router/
+│   │   └── agent_router.py      #   /agent — 비서 대화 엔드포인트
 │   │
-│   ├── schemas/                 # 요청/응답 Pydantic 모델
-│   │   ├── rag_schema.py        #   RAGRequest, RAGResponse
-│   │   └── agent_schema.py      #   AgentRequest, AgentResponse
+│   ├── schemas/
+│   │   └── agent_schema.py      #   요청/응답 모델 (thread_id 포함)
 │   │
-│   ├── core/                    # 앱 전역 설정·초기화
+│   ├── core/
 │   │   ├── config.py            #   pydantic-settings 기반 환경변수
 │   │   └── llm.py               #   Gemini · 임베딩 모델 인스턴스
 │   │
 │   ├── graph/                   # LangGraph "조립/실행"만 담당
-│   │   ├── state.py             #   GraphState (TypedDict)
-│   │   ├── nodes/               #   노드 함수 (관심사별로 분리)
-│   │   │   ├── retrieval.py     #     retrieve
-│   │   │   ├── generation.py    #     generate, refuse_answer
-│   │   │   └── grading.py       #     grade_hallucination, grade_documents, 라우팅 함수
-│   │   └── graph.py             #   StateGraph 조립 + compile
+│   │   ├── state.py             #   MessagesState 기반 상태
+│   │   ├── nodes/
+│   │   │   ├── agent.py         #     agent — bind_tools된 LLM 호출
+│   │   │   ├── confirm.py       #     confirm_action — interrupt 기반 승인
+│   │   │   └── ...              #     라우팅 함수 등
+│   │   └── graph.py             #   StateGraph 조립 + checkpointer + compile
+│   │
+│   ├── tools/                   # 에이전트 도구 정의 (@tool)
+│   │   ├── search_notion.py     #   내부에서 CRAG 파이프라인 재사용
+│   │   ├── web_search.py
+│   │   ├── write_note.py
+│   │   └── create_event.py
 │   │
 │   ├── services/                # 재사용 가능한 "부품"
-│   │   ├── document_store.py    #   벡터스토어·리트리버·문서 등록
+│   │   ├── notion_client.py     #   Notion API 래핑 (목록·본문·생성)
+│   │   ├── notion_index.py      #   증분 동기화 벡터 인덱스
 │   │   ├── prompts.py           #   yaml → ChatPromptTemplate 로딩
-│   │   ├── utils.py             #   format_docs, extract_code_blocks
-│   │   └── rag_service.py       #   query_rag() — baseline 전용
+│   │   └── utils.py
 │   │
-│   └── prompts/
-│       └── rag.yaml             # RAG 프롬프트 템플릿
+│   └── prompts/                 # 프롬프트 템플릿 (yaml)
 │
 └── data/
-    └── chroma_db/               # ChromaDB 영속 저장소 (git 제외)
+    └── chroma_db/               # 노션 페이지 벡터 인덱스 (git 제외)
 ```
 
-**모듈 구성 원칙**
+**모듈 구성 원칙** (이전 프로젝트에서 유지)
 
-- `services/` — 누가 쓰든 상관없는 **재사용 부품**을 모아둠
-- `graph/` — 노드를 어떤 **순서/조건**으로 실행할지(엣지)만 담당하고, 부품은 `services/`에서 가져다 씀
-- `rag_service.py`는 의도적으로 `query_rag()` 하나만 남겨둠 → baseline 비교가 끝나면
-  `rag_router.py` · `rag_schema.py`와 함께 **파일째로 삭제**해도 나머지 코드는 전혀 영향받지 않도록 설계
+- `services/` — 누가 쓰든 상관없는 **재사용 부품**
+- `graph/` — 노드를 어떤 **순서/조건**으로 실행할지만 담당
+- `tools/` — `services/`의 부품을 조합해 에이전트에게 노출하는 **도구 인터페이스**
 
 ---
 
@@ -267,90 +251,56 @@ uv sync
 LANGSMITH_TRACING=true
 LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 LANGSMITH_API_KEY=your_langsmith_api_key
-LANGSMITH_PROJECT=langgraph-agent
+LANGSMITH_PROJECT=notion-assistant
 
 # Google Gemini
 GOOGLE_API_KEY=your_google_api_key
+
+# Notion — 내부 통합(internal integration) 토큰
+NOTION_API_KEY=your_notion_integration_token
+
+# 일정 등록 대상 데이터베이스 (캘린더 뷰로 사용 중인 DB)
+NOTION_CALENDAR_DB_ID=your_database_id
 ```
+
+> Notion 통합 토큰은 [notion.so/my-integrations](https://www.notion.so/my-integrations)에서 발급하고,
+> 검색·작성 대상 페이지에 해당 통합을 **연결(connection 추가)** 해야 API로 접근할 수 있습니다.
 
 ### 3. 서버 실행
 
 ```bash
-uv run uvicorn src.main:app --reload
+uv run uvicorn src.main:app --reload --reload-exclude "data/*" --reload-exclude ".git/*"
 ```
 
 - Swagger UI: `http://localhost:8000/docs`
 
-> ChromaDB 파일 쓰기가 `--reload`의 감시 대상에 걸려 서버가 반복 재시작될 수 있습니다.
-> 필요 시 감시 대상에서 제외하세요:
-> ```bash
-> uv run uvicorn src.main:app --reload --reload-exclude "data/*" --reload-exclude ".git/*"
-> ```
-
-### 4. 예시 문서 적재 (선택)
-
-```bash
-# FastAPI 공식 문서(한국어 튜토리얼) 클론
-git clone --depth 1 https://github.com/fastapi/fastapi /tmp/fastapi-docs
-
-# 튜토리얼 마크다운 일괄 업로드
-for f in /tmp/fastapi-docs/docs/ko/docs/tutorial/*.md; do
-  curl -X POST "http://localhost:8000/api/documents" -F "file=@$f"
-  echo ""
-done
-```
-
 ---
 
-## API 레퍼런스
+## API 설계 초안
 
-### `GET /`
+> 구현 전 설계 단계의 초안입니다. HITL 승인 흐름 때문에 대화가 `thread_id` 단위로 이어집니다.
 
-헬스 체크.
-
-```json
-{ "status": "online", "message": "langgraph-agent server is running" }
-```
-
-### `POST /api/documents`
-
-텍스트/마크다운 파일을 업로드해 RAG 검색 대상으로 등록합니다. 응답의 `chunks`는 **DB 전체 누적 청크 수**입니다.
-
-```json
-// Response
-{ "message": "'path-params.md' 문서가 등록되었습니다.", "chunks": 210 }
-```
-
-### `POST /api/rag` — Baseline
-
-단순 검색 → 생성 체인. 보정 로직이 없습니다.
+### `POST /api/agent`
 
 ```json
 // Request
-{ "question": "경로 매개변수 타입을 어떻게 지정해?" }
+{ "message": "다음주 화요일 3시에 팀 미팅 잡아줘", "thread_id": "user-session-1" }
 
-// Response
+// Response — 쓰기 도구라 승인 대기 (interrupt로 그래프 일시정지)
 {
-  "question": "경로 매개변수 타입을 어떻게 지정해?",
-  "answer": "타입 힌트를 사용해서 지정합니다...",
-  "sources": ["path-params.md"]
+  "status": "pending_confirmation",
+  "message": "7/21(화) 15:00 '팀 미팅' 일정을 캘린더에 등록할까요?"
 }
 ```
 
-### `POST /api/agent` — Corrective RAG
-
-LangGraph 기반. baseline 응답에 더해, 검색된 문서에서 추출한 **코드 예제(`code_examples`)** 를 함께 반환합니다.
-
 ```json
-// Request
-{ "question": "경로 매개변수 타입을 어떻게 지정해?" }
+// Request — 같은 thread_id로 승인 응답
+{ "message": "응 등록해줘", "thread_id": "user-session-1" }
 
-// Response
+// Response — 그래프 재개(resume) 후 실행 완료
 {
-  "question": "경로 매개변수 타입을 어떻게 지정해?",
-  "answer": "타입 힌트를 사용해서 지정합니다...",
-  "sources": ["path-params.md"],
-  "code_examples": ["def read_item(item_id: int):\n    return item_id"]
+  "status": "done",
+  "message": "등록했어요. 7/21(화) 15:00 '팀 미팅' — 페이지 링크: https://notion.so/..."
 }
 ```
 
@@ -359,47 +309,64 @@ LangGraph 기반. baseline 응답에 더해, 검색된 문서에서 추출한 **
 ## 설계 결정
 
 <details>
-<summary><b>왜 baseline과 agent를 둘 다 유지하는가</b></summary>
+<summary><b>왜 Notion AI를 쓰지 않고 직접 만드는가</b></summary>
 
-그래프가 아직 1단계라 현재는 두 응답이 거의 동일합니다. 하지만 baseline을 남겨둬야
-CRAG 노드가 추가된 뒤 **RAGAS(정확도·충실도) / LangSmith Dataset 평가로 개선 효과를 정량 비교**할 수 있습니다.
-"유행이라 LangGraph를 썼다"가 아니라 **분기·재시도 루프가 필요해지는 시점에 도입했다**는 근거를 만들기 위한 구조입니다.
+Notion AI는 유료 구독(Business 플랜 이상)이지만, Notion의 일반 API는 무료입니다.
+API 위에 Gemini(무료 티어)와 로컬 임베딩을 조합하면 구독료 없이 같은 목적을 달성할 수 있습니다.
+다만 이 프로젝트의 주 목적은 비용 절감보다 **LangGraph 에이전트 패턴(ReAct 루프, HITL, 도구 설계)의
+실습·포트폴리오**이며, Notion AI의 대체 상품이 아니라 개인 워크스페이스용 자동화 도구입니다.
+(사내 자동화·개인 자동화는 Notion이 Developer Platform으로 공식 권장하는 사용 방식입니다.)
 </details>
 
 <details>
-<summary><b>왜 마크다운 구조 기반으로 청크를 나누는가</b></summary>
+<summary><b>왜 고정 분기 그래프가 아니라 ReAct 루프인가</b></summary>
 
-일반적인 글자수 기준 분할(`RecursiveCharacterTextSplitter`)은 코드 블록을 중간에서 잘라버립니다.
-`Language.MARKDOWN` 분할기는 코드 펜스(` ``` `)·헤더를 우선 경계로 삼아, 코드가 잘리지 않도록 자릅니다.
-그 대가로 청크 개수는 늘어나지만(설명과 코드가 서로 다른 청크로 분리됨), 코드 온전성을 우선했습니다.
+이전 CRAG는 모든 분기(관련성 평가 실패 → 재작성 → 재검색 ...)를 사람이 미리 설계한 고정 그래프였습니다.
+문서 QA처럼 흐름이 하나뿐인 태스크에는 맞지만, 비서는 요청 유형(검색/작성/일정/잡담)이 매번 달라서
+경우의 수를 미리 나열할 수 없습니다. ReAct 루프는 "어떤 도구를 쓸지"를 LLM의 tool-calling에 맡기고,
+그래프는 "도구 호출 여부 / 쓰기 여부"라는 단순한 분기만 담당합니다.
+`create_react_agent` 프리빌트를 쓰지 않고 StateGraph로 직접 조립하는 이유는, 쓰기 도구 앞에
+**승인 노드(confirm_action)를 끼워 넣어야** 하기 때문입니다 — 프리빌트는 이 지점을 커스텀할 수 없습니다.
 </details>
 
 <details>
-<summary><b>code_examples를 LLM 생성이 아니라 정규식 추출로 만드는 이유</b></summary>
+<summary><b>왜 로컬 벡터 인덱스가 필요한가 — Notion API의 제약</b></summary>
 
-코드의 정확성은 중요합니다. LLM에게 "코드를 그대로 인용하라"고 지시해도 생성 과정에서 변수명·들여쓰기가
-바뀔 수 있습니다. 그래서 답변(`answer`)은 LLM이 자연어로 설명하되, 코드(`code_examples`)는
-**검색된 원문에서 정규식으로 그대로 추출**해 정확성을 보장합니다.
+Notion `search` API는 페이지 **제목**만 검색하고 본문은 검색하지 못합니다.
+"회의록 0708"이라는 제목의 페이지 본문에만 "프로젝트A" 얘기가 있다면 API 검색으로는 찾을 수 없습니다.
+그래서 본문 검색은 로컬 임베딩 인덱스로 직접 구현하되, 스냅샷이 오래되는 문제는
+**검색 요청 시점마다 `last_edited_time` 기준으로 변경분만 재임베딩**하는 증분 동기화로 해결합니다.
+태그·DB 구조 강제(사용자에게 정리 규칙을 요구하는 방식)도 검토했지만, 사용자 부담을 지우지 않는
+증분 인덱스 방식을 택했습니다.
 </details>
 
 <details>
-<summary><b>FastAPI 문서의 한계 — 아직 코드가 잘 안 나오는 이유</b></summary>
+<summary><b>왜 write_note는 저장 전에 검색부터 하는가</b></summary>
 
-FastAPI 원본 마크다운은 실제 파이썬 코드를 `{* ../../docs_src/....py hl[6:7] *}` 형식의
-**include 매크로**로 참조만 합니다(실제 코드는 `docs_src/` 폴더의 별도 파일). 웹사이트 빌드 시 이 자리에
-코드가 채워지므로, 클론한 마크다운 자체에는 코드가 거의 없습니다. 이 매크로를 해석해 실제 코드를 끼워넣는
-**전처리 노드**가 필요하며, 현재 미구현 상태입니다.
+"기존에 관련 페이지가 있는지"를 LLM 단독 판단에 맡기면 존재하지 않는 페이지를 있다고 착각할 수
+있습니다. 검색 오류는 틀린 답을 주는 것에 그치지만, **쓰기 오류는 엉뚱한 페이지를 오염**시킵니다.
+그래서 저장 전에 `search_notion`과 같은 검색 경로로 후보를 확보하고, 그 근거 위에서
+"이어붙일지 / 새로 만들지"를 판단한 뒤, 최종 실행은 사용자 승인을 거칩니다 —
+"검증되지 않은 LLM 단독 판단을 믿지 않는다"는 CRAG의 원칙을 쓰기 경로에 적용한 것입니다.
+</details>
+
+<details>
+<summary><b>CRAG 판단 노드를 재사용하는 이유 — 개인 노트에서 근거 검증은 필수</b></summary>
+
+공개 문서(FastAPI 등)는 LLM이 사전학습으로 이미 알고 있어 검증 노드가 발동할 일이 드뭅니다.
+반면 개인 노트는 LLM이 전혀 모르는 내용이라, 검색된 노트에 실제로 근거가 있는지
+(`grade_hallucination`), 검색 결과가 질문과 관련이 있는지(`grade_documents`) 확인하는 과정이
+답변 신뢰성의 전제 조건이 됩니다. 같은 노드가 도메인이 바뀌자 "형식적 안전망"에서
+"필수 검증"으로 역할이 바뀌는 것이 이 개편의 핵심입니다.
 </details>
 
 ---
 
 ## 로드맵
 
-- [x] `retrieve → generate` 그래프 (1단계)
-- [x] `grade_hallucination` — 답변 근거 여부 체크, 실패 시 재생성 (2단계)
-- [x] `grade_documents` — 문서 관련성 평가 (3단계, 판단 노드까지 완료)
-- [ ] `transform_query` — 관련 없으면 질의 재작성 후 로컬 재검색 (3단계, 진행 중)
-- [ ] `route_question` · `web_search` · `grade_answer_relevance` — 질문 라우팅, 웹검색 폴백, 답변 적절성 평가 (4단계)
-- [ ] `{* *}` include 매크로 해석 전처리 노드 (실제 코드 예제 적재)
-- [ ] RAGAS / LangSmith Dataset 기반 baseline 대비 성능 평가
-- [ ] baseline(`rag_router` · `rag_service` · `rag_schema`) 제거
+- [ ] **1단계 — ReAct 뼈대**: `MessagesState` 전환, `agent ⇄ tools` 루프, 도구 유무 분기
+- [ ] **2단계 — search_notion**: Notion API 연동(목록·본문 조회), 증분 동기화 인덱스, CRAG 판단 파이프라인 재사용
+- [ ] **3단계 — write_note + confirm_action**: `interrupt()` 기반 HITL 승인, 병합/신규 판단
+- [ ] **4단계 — create_event**: 자연어 일정 해석, 캘린더 뷰 DB에 항목 생성 (confirm_action 재사용)
+- [ ] **5단계 — web_search**: Tavily 연동, 노션에 없는 정보 폴백
+- [ ] **6단계 — 정리·평가**: 이전 CRAG 전용 코드(baseline 라우터 등) 제거, LangSmith 기반 도구 선택 정확도 평가
