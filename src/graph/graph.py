@@ -1,39 +1,21 @@
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
 
-from src.graph.nodes.generation import generate, refuse_answer
-from src.graph.nodes.grading import (
-    grade_documents,
-    grade_hallucination,
-    route_documents_result,
-    route_hallucination_result,
-)
-from src.graph.nodes.retrieval import retrieve, transform_query
-from src.graph.state import GraphState
+from src.graph.nodes.agent import agent, route_agent_result, tools
+from src.graph.state import AgentState
 
-graph_builder = StateGraph(GraphState)
+graph_builder = StateGraph(AgentState)
 
-graph_builder.add_node("retrieve", retrieve)
-graph_builder.add_node("generate", generate)
-graph_builder.add_node("grade_hallucination", grade_hallucination)
-graph_builder.add_node("refuse_answer", refuse_answer)
-graph_builder.add_node("grade_documents", grade_documents)
-graph_builder.add_node("transform_query", transform_query)
+graph_builder.add_node("agent", agent)
+graph_builder.add_node("tools", ToolNode(tools))
 
-graph_builder.add_edge(START, "retrieve")
-graph_builder.add_edge("transform_query", "retrieve")
-graph_builder.add_edge("retrieve", "grade_documents")
-graph_builder.add_edge("generate", "grade_hallucination")
-graph_builder.add_edge("refuse_answer", END)
-
+graph_builder.add_edge(START, "agent")
 graph_builder.add_conditional_edges(
-    "grade_documents",
-    route_documents_result,
-    {"generate": "generate", "refuse": "refuse_answer", "transform": "transform_query"},
+    "agent",
+    route_agent_result,
+    {"continue": "tools", "end": END},
 )
-graph_builder.add_conditional_edges(
-    "grade_hallucination",
-    route_hallucination_result,
-    {"end": END, "retry": "generate", "refuse": "refuse_answer"},
-)
+graph_builder.add_edge("tools", "agent")
 
-graph = graph_builder.compile()
+graph = graph_builder.compile(checkpointer=MemorySaver())
